@@ -1,0 +1,41 @@
+# Netlify configuration for FLUXORA (Vite + React single-page app)
+# Docs: docs/NETLIFY.md
+
+[build]
+  command = "npx --yes bun@1.3.14 install --frozen-lockfile && npx --yes bun@1.3.14 run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+  # Set these in the Netlify UI (Site configuration > Environment variables), not here:
+  #   VITE_WALLETCONNECT_PROJECT_ID, VITE_ARC_RPC_URL, VITE_ARC_EXPLORER_URL,
+  #   VITE_FLUXORA_TOKEN_ADDRESS, VITE_FLUXORA_PAYMENTS_ADDRESS, VITE_FLUXORA_DEPLOY_BLOCK
+  # Leave VITE_APP_URL empty: the app uses whatever domain serves it.
+
+# Single-page app: every path (for example /send or /pay?request=1) must load index.html.
+# Real files (assets, favicon) are served as-is because "force" is not set.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Never cache the HTML shell, so a new deploy is picked up immediately
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+# Hashed build files never change, cache them for a year
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    # A wallet UI must not be embeddable in another site (clickjacking)
+    X-Frame-Options = "DENY"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=()"

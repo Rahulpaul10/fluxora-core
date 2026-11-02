@@ -1,0 +1,153 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   FLUXORA design tokens
+   Palette: Electric Purple #8257FF, Neon Cyan #27D9FF, Vibrant Pink #FF55B8,
+   Emerald #20D6A0, Midnight Navy #090D1C, Card #141A2E.
+   Each page sets data-theme so Send, Receive, Swap, Bridge and Pay get their own colors.
+--------------------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+  --bg: #090d1c;
+  --card: #141a2e;
+  --a: #8257ff;
+  --b: #27d9ff;
+  --c: #ff55b8;
+  --on: #ffffff;
+}
+[data-theme='dashboard'] { --a: #8257ff; --b: #27d9ff; --c: #ff55b8; --on: #ffffff; }
+[data-theme='send']      { --a: #ff55b8; --b: #8257ff; --c: #27d9ff; --on: #ffffff; }
+[data-theme='receive']   { --a: #20d6a0; --b: #27d9ff; --c: #8257ff; --on: #04141a; }
+[data-theme='swap']      { --a: #27d9ff; --b: #8257ff; --c: #ff55b8; --on: #04101f; }
+[data-theme='bridge']    { --a: #8257ff; --b: #20d6a0; --c: #27d9ff; --on: #ffffff; }
+[data-theme='pay']       { --a: #ff55b8; --b: #ffb04d; --c: #8257ff; --on: #1a0a14; }
+[data-theme='history']   { --a: #8257ff; --b: #ff55b8; --c: #27d9ff; --on: #ffffff; }
+
+* { box-sizing: border-box; }
+html { background: var(--bg); -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  min-height: 100dvh;
+  font-family: 'DM Sans', sans-serif;
+  color: #e9edff;
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+img, svg { max-width: 100%; }
+
+@layer components {
+  /* Glass card with a themed hairline on top */
+  .glass {
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.02)),
+      rgba(20, 26, 46, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    box-shadow: 0 18px 50px -26px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+  .glass::before {
+    content: '';
+    position: absolute;
+    inset: 0 18% auto 18%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--a), var(--b), transparent);
+    opacity: 0.75;
+    pointer-events: none;
+  }
+  .glass-inner {
+    background: rgba(9, 13, 28, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  .lift { transition: transform 0.28s cubic-bezier(.2,.8,.2,1), box-shadow 0.28s, border-color 0.28s; }
+  .lift:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--a) 55%, transparent); box-shadow: 0 22px 50px -22px color-mix(in srgb, var(--a) 60%, transparent); }
+
+  .btn-primary {
+    @apply inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl px-5 font-semibold transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-40;
+    color: var(--on);
+    background: linear-gradient(110deg, var(--a), var(--b), var(--a));
+    background-size: 200% 100%;
+    box-shadow: 0 14px 34px -14px color-mix(in srgb, var(--a) 85%, transparent);
+  }
+  .btn-primary:hover:not(:disabled) { background-position: 100% 0; transform: translateY(-1px); box-shadow: 0 18px 40px -14px color-mix(in srgb, var(--b) 80%, transparent); }
+  .btn-primary:active:not(:disabled) { transform: translateY(0) scale(0.99); }
+  .btn-ghost {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 text-sm font-medium text-slate-100 transition hover:border-white/20 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .field {
+    @apply w-full rounded-2xl border border-white/10 bg-navy-950/70 px-4 py-3 text-base text-white outline-none transition placeholder:text-slate-500;
+  }
+  .field:focus { border-color: var(--a); box-shadow: 0 0 0 3px color-mix(in srgb, var(--a) 25%, transparent); }
+  .label { @apply text-xs font-semibold uppercase tracking-[0.1em] text-slate-400; }
+  .pill { @apply inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200; }
+
+  /* Animated gradient text */
+  .gradient-text {
+    background: linear-gradient(100deg, #8257ff, #27d9ff, #ff55b8, #20d6a0, #8257ff);
+    background-size: 300% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: pan 10s linear infinite;
+  }
+  .theme-text {
+    background: linear-gradient(100deg, var(--a), var(--b), var(--a));
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: pan 8s linear infinite;
+  }
+  .theme-chip { background: linear-gradient(135deg, var(--a), var(--b)); color: var(--on); }
+  .skeleton { position: relative; overflow: hidden; background: rgba(255,255,255,0.06); border-radius: 12px; }
+  .skeleton::after { content: ''; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, rgba(255,255,255,0.09), transparent); animation: shimmer 1.6s infinite; }
+  .fx-pulse { animation: fxPulse 1.8s ease-in-out infinite; }
+  .dot-live { position: relative; }
+  .dot-live::after { content: ''; position: absolute; inset: 0; border-radius: 9999px; background: inherit; animation: pulseRing 2s ease-out infinite; }
+}
+
+@keyframes fxPulse { 0%, 100% { opacity: 0.65; transform: scale(0.96); } 50% { opacity: 1; transform: scale(1); } }
+
+/* Animated aurora backdrop (fixed, behind everything).
+   The glow is a radial gradient instead of a CSS blur filter: same soft look, but no huge filtered layers to
+   rasterize and keep in GPU memory. Motion is transform-only, so it runs on the compositor. */
+.aurora { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; contain: strict; background:
+  radial-gradient(1200px 700px at 50% -20%, rgba(130, 87, 255, 0.16), transparent 60%), var(--bg); }
+.aurora .orb { position: absolute; border-radius: 9999px; opacity: 0.5; will-change: transform; transform: translateZ(0); }
+.aurora .o1 { width: calc(46vw + 180px); height: calc(46vw + 180px); min-width: 520px; min-height: 520px; left: calc(-12vw - 90px); top: calc(-14vw - 90px); background: radial-gradient(closest-side, #8257ff 45%, rgba(130,87,255,.45) 72%, transparent 100%); animation: drift1 22s ease-in-out infinite; }
+.aurora .o2 { width: calc(40vw + 180px); height: calc(40vw + 180px); min-width: 480px; min-height: 480px; right: calc(-10vw - 90px); top: calc(4vh - 90px); background: radial-gradient(closest-side, #27d9ff 45%, rgba(39,217,255,.45) 72%, transparent 100%); opacity: 0.32; animation: drift2 28s ease-in-out infinite; }
+.aurora .o3 { width: calc(38vw + 180px); height: calc(38vw + 180px); min-width: 460px; min-height: 460px; left: calc(22vw - 90px); bottom: calc(-18vw - 90px); background: radial-gradient(closest-side, #ff55b8 45%, rgba(255,85,184,.45) 72%, transparent 100%); opacity: 0.28; animation: drift3 25s ease-in-out infinite; }
+.aurora .o4 { width: calc(30vw + 180px); height: calc(30vw + 180px); min-width: 420px; min-height: 420px; right: calc(6vw - 90px); bottom: calc(-10vw - 90px); background: radial-gradient(closest-side, #20d6a0 45%, rgba(32,214,160,.45) 72%, transparent 100%); opacity: 0.2; animation: drift2 31s ease-in-out infinite; }
+/* Phones and tablets: keep the glow, drop the continuous motion. Cards blur what is behind them, so a moving
+   background makes every card re-blur on every frame. */
+@media (max-width: 1023px) {
+  .aurora .orb { animation: none; }
+}
+.aurora .grid { position: absolute; inset: 0; opacity: 0.5;
+  background-image: linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+  background-size: 56px 56px; -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 70%); mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 70%); }
+
+.tabular { font-variant-numeric: tabular-nums; }
+.safe-bottom { padding-bottom: max(0.75rem, env(safe-area-inset-bottom)); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 8px; }
+select.field { appearance: none; background-image: linear-gradient(45deg, transparent 50%, #94a3b8 50%), linear-gradient(135deg, #94a3b8 50%, transparent 50%); background-position: calc(100% - 20px) 55%, calc(100% - 14px) 55%; background-size: 6px 6px; background-repeat: no-repeat; padding-right: 2.5rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* Slim progress line, shown only if opening a page takes longer than a moment (the delay avoids a flicker). */
+.fx-progress { position: fixed; left: 0; top: 0; z-index: 70; height: 2px; width: 100%; transform-origin: 0 50%;
+  background: linear-gradient(90deg, var(--a), var(--b)); opacity: 0; animation: fxProgress 1.6s cubic-bezier(.2,.8,.2,1) 0.12s forwards; }
+@keyframes fxProgress { 0% { opacity: 1; transform: scaleX(0.05); } 100% { opacity: 1; transform: scaleX(0.9); } }
+
+/* Smaller blur radius on phones and tablets: the same frosted look at a fraction of the GPU cost. */
+@media (max-width: 1023px) {
+  .glass { backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%); }
+}

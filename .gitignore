@@ -1,0 +1,32 @@
+# dependencies and build output
+node_modules
+dist
+*.log
+
+# secrets: never commit these
+.env
+.env.*
+!.env.example
+.circle
+recovery_file*
+*.keystore
+keystore/
+
+# Arc Studio runtime logs
+traces.jsonl
+console.jsonl
+
+# Foundry (anchored to the repo root with a leading slash, so they never match source folders such as src/lib)
+/contracts/out/
+/contracts/cache/
+/contracts/broadcast/
+/cache/
+/out/
+/broadcast/
+# forge-std is installed with `bun run setup:contracts`; only the ROOT lib folder is ignored, never src/lib
+/lib/
+
+# editor / OS
+.DS_Store
+.idea
+.vscode

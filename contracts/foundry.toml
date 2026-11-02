@@ -1,0 +1,19 @@
+# Standalone Foundry config so the contracts folder builds on its own:
+#   cd contracts && forge build && forge test
+# (The repository root foundry.toml points at the same folders, so both work.)
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+cache_path = "cache"
+libs = ["../lib", "../node_modules"]
+remappings = [
+  "@openzeppelin/contracts/=../node_modules/@openzeppelin/contracts/",
+  "forge-std/=../lib/forge-std/src/",
+]
+solc_version = "0.8.28"
+auto_detect_solc = false
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200

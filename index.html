@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="generator" content="Arc Studio by Circle — https://studio.arc.io" />
+    <meta name="theme-color" content="#070B1F" />
+    <meta name="description" content="FLUXORA. One Wallet. Every Possibility. A DeFi wallet on Arc." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" type="image/svg+xml" href="/fluxora-icon.svg" />
+    <link rel="apple-touch-icon" href="/fluxora-icon.svg" />
+    <meta property="og:title" content="FLUXORA · One Wallet. Every Possibility." />
+    <meta property="og:description" content="Send, swap, bridge and get paid in USDC on Arc." />
+    <meta property="og:type" content="website" />
+    <title>FLUXORA · One Wallet. Every Possibility.</title>
+    <style>
+      #fx-splash { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: #070b1f; color: #fff; }
+      #fx-splash svg { animation: fx-splash-pulse 1.8s ease-in-out infinite; }
+      #fx-splash span { font: 700 24px 'Space Grotesk', sans-serif; letter-spacing: 0.2em; padding-left: 0.2em; }
+      @keyframes fx-splash-pulse { 0%, 100% { opacity: 0.65; transform: scale(0.96); } 50% { opacity: 1; transform: scale(1); } }
+      @media (prefers-reduced-motion: reduce) { #fx-splash svg { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <!-- Built with Arc Studio — https://studio.arc.io -->
+    <div id="root">
+      <!-- Static splash shown until the app mounts; React replaces it. -->
+      <div id="fx-splash" role="status" aria-label="Loading FLUXORA">
+        <svg width="72" height="72" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="sm" x1="10" y1="6" x2="40" y2="44" gradientUnits="userSpaceOnUse"><stop stop-color="#9B7BFF" /><stop offset="1" stop-color="#27D9FF" /></linearGradient>
+            <linearGradient id="sa" x1="12" y1="27" x2="38" y2="27" gradientUnits="userSpaceOnUse"><stop stop-color="#27D9FF" /><stop offset="1" stop-color="#20D6A0" /></linearGradient>
+          </defs>
+          <path d="M12.5 41V21C12.5 13 18 8 26.5 8C30.5 8 33.5 9.2 36.5 11.2" stroke="url(#sm)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M12.5 27H25" stroke="url(#sa)" stroke-width="5.2" stroke-linecap="round" />
+          <circle cx="34.5" cy="27" r="3.6" fill="url(#sa)" />
+        </svg>
+        <span>FLUXORA</span>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

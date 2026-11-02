@@ -1,0 +1,9 @@
+{
+  "contractAddress": "",
+  "network": "",
+  "deployerWalletId": "",
+  "contract_code_path": "/home/user/app/contracts/src/FluxoraPaymentsStandalone.sol",
+  "contract_compiled_code_path": "/home/user/app/contracts/out/FluxoraPaymentsStandalone.sol/FluxoraPaymentsStandalone.json",
+  "contract_network_and_links": {},
+  "contract_deployments": []
+}
