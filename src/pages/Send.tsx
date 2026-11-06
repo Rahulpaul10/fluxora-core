@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { erc20Abi, getAddress, isAddress, zeroAddress, type Address, type Hex } from 'viem'
 import { useAccount, usePublicClient } from 'wagmi'
 import { useGuardedWrite } from '@/hooks/useGuardedWallet'
@@ -9,7 +9,9 @@ import { Amount } from '@/onchain-money'
 import { useTokenBalances } from '@/hooks/useBalances'
 import { ARC_TOKENS, USDC, type TokenInfo } from '@/lib/tokens'
 import { ARC_CHAIN_ID, explorerAddress } from '@/config/networks'
-import { arcGasCostUsdc, fmtGasUsdc, getFees } from '@/lib/fees'
+import { arcGasCostUsdc, fmtGasUsdc, getFees, prepaidGasReserveUsdc } from '@/lib/fees'
+import { checkSend, maxSendable } from '@/lib/sendReserve'
+import { verifySender } from '@/lib/accountSync'
 import { fmtToken, shortAddr } from '@/lib/format'
 import { parseTxError } from '@/lib/errors'
 import { recordActivity } from '@/lib/activity'
@@ -21,6 +23,18 @@ import { Card, ExplorerLink, Notice, PageTitle, Row, Spinner } from '@/component
 
 const NATIVE_SENTINEL = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
 const SYSTEM_EMITTER = '0xfffffffffffffffffffffffffffffffffffffffe'
+/** Only used to price gas before a recipient has been typed (a fresh account costs the most). It is never sent to. */
+const ESTIMATE_RECIPIENT: Address = '0x2222222222222222222222222222222222222222'
+
+/** Follows `value` after it has stopped changing for `ms`, so typing does not fire one RPC call per keystroke. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return debounced
+}
 
 export function Send({ presetTo, presetAmount, presetToken }: { presetTo?: string; presetAmount?: string; presetToken?: string }) {
   return (
@@ -39,7 +53,10 @@ export function Send({ presetTo, presetAmount, presetToken }: { presetTo?: strin
 function SendForm({ presetTo, presetAmount, presetToken }: { presetTo?: string; presetAmount?: string; presetToken?: string }) {
   const { address } = useAccount()
   const client = usePublicClient({ chainId: ARC_CHAIN_ID })
-  const { writeContractAsync } = useGuardedWrite()
+  // The wallet prices a plain transfer itself: the request carries only from, to and data (no gas or fee fields), so its
+  // own simulation and fee estimate run on a standard request. The page still estimates gas to catch a transfer that
+  // would revert, and keeps a USDC reserve for the gas the wallet will prepay.
+  const { writeContractAsync } = useGuardedWrite({ walletManagedFees: true })
   const balances = useTokenBalances()
 
   const [symbol, setSymbol] = useState(ARC_TOKENS.find((t) => t.symbol === presetToken)?.symbol ?? USDC.symbol)
@@ -50,24 +67,41 @@ function SendForm({ presetTo, presetAmount, presetToken }: { presetTo?: string; 
   const [busy, setBusy] = useState(false)
   const [hash, setHash] = useState<Hex>()
   const [error, setError] = useState<string>()
+  const [hint, setHint] = useState<string>()
 
   const row = balances.rows.find((r) => r.token.symbol === symbol) ?? balances.rows[0]
   const token: TokenInfo = row.token
   const usdcRow = balances.rows.find((r) => r.token.symbol === 'USDC')
   const balance = row.raw
 
-  // Real gas estimate for an ERC-20 transfer, priced in USDC with the 20 gwei Arc fee floor.
+  // What the gas estimate is priced on: the real recipient and amount once they are valid and affordable, otherwise a
+  // placeholder recipient and 1 unit. Never a transfer to yourself, which costs less than a transfer to another account.
+  const trimmedTo = to.trim()
+  const draftRecipient = isAddress(trimmedTo) ? getAddress(trimmedTo) : undefined
+  const draftRaw = (() => {
+    try {
+      const a = Amount.parse(amount, token.decimals)
+      return a.isPositive() ? a.raw : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  const estimateTo = useDebounced(draftRecipient ?? ESTIMATE_RECIPIENT, 300)
+  const estimateAmount = useDebounced(draftRaw !== undefined && balance !== undefined && draftRaw <= balance ? draftRaw : 1n, 300)
+
+  // Real gas estimate for the ERC-20 transfer, priced in USDC. `reserve` is the USDC the chain takes up front
+  // (estimate x the wallet's gas multiplier x max fee, rounded up) and is what must stay in the account.
   const gas = useQuery({
-    queryKey: ['send-gas', address, token.address],
+    queryKey: ['send-gas', address, token.address, estimateTo, estimateAmount.toString()],
     enabled: Boolean(client && address),
     refetchInterval: 30_000,
     queryFn: async () => {
       if (!client || !address) throw new Error('no client')
       const [units, fees] = await Promise.all([
-        client.estimateContractGas({ account: address, address: token.address, abi: erc20Abi, functionName: 'transfer', args: [address, 1n] }),
+        client.estimateContractGas({ account: address, address: token.address, abi: erc20Abi, functionName: 'transfer', args: [estimateTo, estimateAmount] }),
         getFees(client, ARC_CHAIN_ID),
       ])
-      return { units, fees, cost: arcGasCostUsdc(units, fees.maxFeePerGas) }
+      return { units, fees, cost: arcGasCostUsdc(units, fees.maxFeePerGas), reserve: prepaidGasReserveUsdc(units, fees.maxFeePerGas) }
     },
   })
 
@@ -92,13 +126,21 @@ function SendForm({ presetTo, presetAmount, presetToken }: { presetTo?: string; 
       try {
         const a = Amount.parse(amount, token.decimals)
         if (!a.isPositive()) result.amountError = 'Amount must be greater than zero.'
-        else if (balance !== undefined && a.raw > balance) result.amountError = `Insufficient balance. You have ${fmtToken(balance, token.decimals)} ${token.symbol}.`
         else {
-          result.raw = a.raw
-          const cost = gas.data?.cost
-          if (cost && usdcRow?.raw !== undefined) {
-            const need = token.symbol === 'USDC' ? a.raw + cost.raw : cost.raw
-            if (usdcRow.raw < need) result.amountError = 'Not enough USDC to cover the amount plus the network fee.'
+          const verdict = checkSend({ isUsdc: token.symbol === 'USDC', amount: a.raw, tokenBalance: balance, usdcBalance: usdcRow?.raw, reserve: gas.data?.reserve })
+          if (verdict.kind === 'ok') result.raw = a.raw
+          else if (verdict.kind === 'insufficient-balance') result.amountError = `Insufficient balance. You have ${fmtToken(balance ?? 0n, token.decimals)} ${token.symbol}.`
+          else if (verdict.kind === 'insufficient-gas') {
+            const reserve = fmtToken(verdict.reserve, 6, 6)
+            result.amountError =
+              token.symbol !== 'USDC'
+                ? `Not enough USDC to pay the network fee. Keep about ${reserve} USDC for gas.`
+                : verdict.max > 0n
+                  ? `Not enough USDC once the network fee (about ${reserve} USDC) is reserved. The most you can send is ${fmtToken(verdict.max, 6, 6)} USDC.`
+                  : `Not enough USDC to cover the network fee (about ${reserve} USDC).`
+          } else if (gas.isError && !gas.isFetching) {
+            // No fee, no proof the transfer can succeed: do not let it through. Say why when the node did.
+            result.amountError = `The network fee could not be estimated, so this transfer cannot be checked. ${parseTxError(gas.error).message}`
           }
         }
       } catch {
@@ -114,10 +156,15 @@ function SendForm({ presetTo, presetAmount, presetToken }: { presetTo?: string; 
     if (balance === undefined) return
     let max = balance
     if (token.symbol === 'USDC') {
-      const cost = gas.data?.cost.raw ?? 0n
-      const reserve = (cost * 12n) / 10n // 20% buffer over the live estimate
-      max = balance > reserve ? balance - reserve : 0n
+      // Leave the full prepaid gas (not just the estimated cost): the chain reserves gasLimit x maxFee up front.
+      const reserve = gas.data?.reserve
+      if (reserve === undefined) {
+        setHint('The network fee is still being estimated. Try Max again in a moment.')
+        return
+      }
+      max = maxSendable(balance, reserve)
     }
+    setHint(undefined)
     setAmount(Amount.fromRaw(max, token.decimals).toString())
   }
 
@@ -129,12 +176,21 @@ function SendForm({ presetTo, presetAmount, presetToken }: { presetTo?: string; 
       // The guarded wallet estimates gas first (a call that would revert never reaches the wallet) and attaches fees
       const h = await writeContractAsync({
         chainId: ARC_CHAIN_ID,
+        // The same account whose balance was checked on this page. The guard refuses the request if the wallet is
+        // on a different account, so the sender can never silently differ from the one shown.
+        account: address,
         address: token.address,
         abi: erc20Abi,
         functionName: 'transfer',
         args: [check.recipient, check.raw],
       })
       setHash(h)
+      // Read the transaction back: if the wallet signed from another account than the one shown, say so loudly.
+      void verifySender(client, h, address).then((v) => {
+        if (v.status === 'mismatch') {
+          toast.error(`The wallet sent this transfer from ${shortAddr(v.actual)}, not from ${shortAddr(address)} as shown. Check your wallet before sending again.`, { duration: 30_000 })
+        }
+      })
       recordActivity({
         hash: h,
         kind: 'send',
@@ -207,13 +263,17 @@ function SendForm({ presetTo, presetAmount, presetToken }: { presetTo?: string; 
                 className="min-w-0 flex-1 bg-transparent font-display text-3xl font-semibold text-white outline-none placeholder:text-slate-600 tabular"
                 placeholder="0.00"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value.replace(/,/g, '.'))}
+                onChange={(e) => {
+                  setHint(undefined)
+                  setAmount(e.target.value.replace(/,/g, '.'))
+                }}
               />
               <TokenButton token={token} onClick={() => setPicker(true)} />
             </div>
-            {check.amountError && <p className="mt-1.5 text-sm text-flux-pink">{check.amountError}</p>}
+            {(check.amountError ?? hint) && <p className="mt-1.5 text-sm text-flux-pink">{check.amountError ?? hint}</p>}
           </div>
 
+          <Row label="From" value={address ? shortAddr(address) : ''} mono />
           <Row
             label="Network fee (estimate)"
             value={gas.data ? `${fmtGasUsdc(gas.data.cost)} USDC` : gas.isLoading ? <Spinner /> : 'Unavailable'}

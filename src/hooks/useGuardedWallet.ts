@@ -5,7 +5,7 @@ import { getPublicClient } from 'wagmi/actions'
 import { config } from '@/config/wallet'
 import { ARC_CHAIN_ID, asChainId } from '@/config/networks'
 import { TxError } from '@/lib/errors'
-import { getFees } from '@/lib/fees'
+import { bufferedGasLimit, getFees } from '@/lib/fees'
 import { recordTiming } from '@/lib/txRegistry'
 import { mark, newTimeline, type Timeline } from '@/lib/txTimeline'
 import { assertWalletReady } from '@/lib/txLifecycle'
@@ -42,13 +42,11 @@ const subscribe = (cb: () => void) => {
 }
 export const useWalletPrompt = (): PromptSnapshot => useSyncExternalStore(subscribe, () => snapshot, () => snapshot)
 
-const GAS_BUFFER_NUM = 125n
-const GAS_BUFFER_DEN = 100n
-
 interface Timed<T> { value: T; prepareMs: number; walletMs: number; timeline: Timeline }
 
 async function guarded<P, T>(
   chainId: number | undefined,
+  expectedAccount: Hex | undefined,
   prepare: (address: Hex, tl: Timeline) => Promise<P>,
   run: (prepared: P) => Promise<T>,
 ): Promise<Timed<T>> {
@@ -67,7 +65,7 @@ async function guarded<P, T>(
     if (tl.marks.some((m) => m.name.startsWith('Page lost focus'))) mark(tl, 'Page regained focus (wallet window closed)')
   }
   try {
-    const { address } = await assertWalletReady({ chainId })
+    const { address } = await assertWalletReady({ chainId, expectedAccount })
     mark(tl, 'Pre-flight done (wallet connected, chain and RPC verified)')
     const prepared = await prepare(address, tl)
     const t1 = performance.now()
@@ -94,22 +92,36 @@ interface GasClient {
 
 type Loose = Record<string, unknown> & { chainId?: number; gas?: bigint; maxFeePerGas?: bigint; gasPrice?: bigint; account?: unknown }
 
-/** Adds gas (estimated, +25%) and fees when the caller did not set them. Gas and fees are fetched in parallel. */
-async function withGasAndFees(args: Loose, address: Hex, tl: Timeline, estimate: (client: GasClient, account: Hex) => Promise<bigint>): Promise<Loose> {
+/** The sender a caller asked for, if it named one as an address (the check in assertWalletReady compares it). */
+const requestedAccount = (args: Loose): Hex | undefined => (typeof args.account === 'string' ? (args.account as Hex) : undefined)
+
+/**
+ * Adds gas (estimated, +25%) and fees when the caller did not set them. Gas and fees are fetched in parallel.
+ * With `walletManagedFees` the estimate still runs (it is the revert check: a call that would fail never reaches the
+ * wallet) but gas and fees are NOT added, so the wallet receives a standard `from`/`to`/`data` request and prices it itself.
+ */
+async function withGasAndFees(
+  args: Loose,
+  address: Hex,
+  tl: Timeline,
+  estimate: (client: GasClient, account: Hex) => Promise<bigint>,
+  walletManagedFees = false,
+): Promise<Loose> {
   const chainId = args.chainId ?? ARC_CHAIN_ID
   const client = getPublicClient(config, { chainId: asChainId(chainId) }) as unknown as (GasClient & PublicClient) | undefined
   if (!client) return args
   const needGas = args.gas === undefined
-  const needFees = args.maxFeePerGas === undefined && args.gasPrice === undefined
+  const needFees = !walletManagedFees && args.maxFeePerGas === undefined && args.gasPrice === undefined
   mark(tl, 'Gas and fee estimation started')
   const [gas, fees] = await Promise.all([
     needGas ? estimate(client, address).then((g) => (mark(tl, 'Gas estimate answered by the app RPC'), g)) : Promise.resolve(args.gas as bigint),
     needFees ? getFees(client, chainId).then((f) => (mark(tl, 'Fee quote answered'), f)) : Promise.resolve(undefined),
   ])
   mark(tl, 'Gas and fee estimation done')
+  if (walletManagedFees) return args
   return {
     ...args,
-    gas: needGas ? (gas * GAS_BUFFER_NUM) / GAS_BUFFER_DEN : gas,
+    gas: needGas ? bufferedGasLimit(gas) : gas,
     ...(fees ? { maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas } : {}),
   }
 }
@@ -118,14 +130,21 @@ const noteTiming = (hash: unknown, chainId: number | undefined, t: { prepareMs: 
   if (typeof hash === 'string' && hash.startsWith('0x')) recordTiming(hash as Hex, chainId ?? ARC_CHAIN_ID, t)
 }
 
-export function useGuardedWrite() {
+export function useGuardedWrite(options: { walletManagedFees?: boolean } = {}) {
   const w = useWriteContract()
+  const walletManagedFees = options.walletManagedFees === true
   const writeContractAsync = (async (args: Loose) => {
     const { value, prepareMs, walletMs, timeline } = await guarded(
       args.chainId,
+      requestedAccount(args),
       (address, tl) =>
-        withGasAndFees(args, address, tl, (client, account) =>
-          client.estimateContractGas({ ...(args as object), account }),
+        // The request names its sender explicitly: the account that was checked is the account that signs.
+        withGasAndFees(
+          { ...args, account: address },
+          address,
+          tl,
+          (client, account) => client.estimateContractGas({ ...(args as object), account }),
+          walletManagedFees,
         ),
       (prepared) => w.writeContractAsync(prepared as never),
     )
@@ -140,8 +159,9 @@ export function useGuardedSend() {
   const sendTransactionAsync = (async (args: Loose) => {
     const { value, prepareMs, walletMs, timeline } = await guarded(
       args.chainId,
+      requestedAccount(args),
       (address, tl) =>
-        withGasAndFees(args, address, tl, (client, account) =>
+        withGasAndFees({ ...args, account: address }, address, tl, (client, account) =>
           client.estimateGas({ ...(args as object), account }),
         ),
       (prepared) => s.sendTransactionAsync(prepared as never),
@@ -155,6 +175,6 @@ export function useGuardedSend() {
 export function useGuardedSign() {
   const s = useSignTypedData()
   const signTypedDataAsync = ((args: Parameters<typeof s.signTypedDataAsync>[0]) =>
-    guarded(undefined, () => Promise.resolve(args), (a) => s.signTypedDataAsync(a)).then((r) => r.value)) as typeof s.signTypedDataAsync
+    guarded(undefined, undefined, () => Promise.resolve(args), (a) => s.signTypedDataAsync(a)).then((r) => r.value)) as typeof s.signTypedDataAsync
   return { ...s, signTypedDataAsync }
 }

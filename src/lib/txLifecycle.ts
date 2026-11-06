@@ -4,6 +4,7 @@ import { getAccount, getPublicClient } from 'wagmi/actions'
 import { config } from '@/config/wallet'
 import { ARC_CHAIN_ID, HOME_NETWORK } from '@/config/networks'
 import { TxError } from './errors'
+import { checkSender } from './accountSync'
 
 export * from './txTracker'
 
@@ -34,12 +35,22 @@ export async function verifyRpcChain(): Promise<void> {
  * Must pass before any wallet prompt. Uses the wallet's LIVE chain (asked from the wallet itself, not the
  * cached UI state) so a transaction can never be signed for the wrong network.
  */
-export async function assertWalletReady(options: { chainId?: number } = {}): Promise<{ address: Address }> {
+export async function assertWalletReady(options: { chainId?: number; expectedAccount?: Address } = {}): Promise<{ address: Address }> {
   const wanted = options.chainId ?? ARC_CHAIN_ID
   const account = getAccount(config)
   if (!account.isConnected || !account.address || !account.connector) {
     throw new TxError('wallet-disconnected', 'Your wallet is disconnected. Reconnect it and try again.')
   }
+  // The account FLUXORA shows, the account named in the request and the account the wallet reports must be one and
+  // the same. The wallet is asked directly because wagmi's copy only changes when the wallet announces a switch.
+  let liveAccounts: readonly Address[]
+  try {
+    liveAccounts = await account.connector.getAccounts()
+  } catch {
+    throw new TxError('wallet-disconnected', 'Could not reach your wallet. Unlock it or reconnect, then try again.')
+  }
+  const accountCheck = checkSender({ shown: account.address, request: options.expectedAccount, live: liveAccounts })
+  if (!accountCheck.ok) throw new TxError(accountCheck.code, accountCheck.message)
   let live: number
   try {
     live = await account.connector.getChainId()

@@ -10,66 +10,63 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title Fluxora ERC-20 Escrow
-/// @notice Buyer-funded escrow for the Fluxora wallet, not a token. Amounts are raw token
-/// units (for example, 1 USDC with 6 decimals is 1_000_000 units).
-/// @dev This unaudited, non-upgradeable contract temporarily HOLDS tokens; "non-custodial"
-/// means the owner has no discretionary custody or withdrawal power, not that tokens stay
-/// in the buyer's wallet. Creation locks funds in Pending until the seller accepts the terms
-/// before the release deadline; either party can cancel a Pending escrow for a full refund.
-/// After acceptance, only the buyer can release before the release deadline, and the seller
-/// can voluntarily refund at any time. At the refund deadline, releaseOnExpiry permits anyone
-/// to release to the seller when true, or permits the buyer to refund when false. A dispute
-/// before that deadline freezes ordinary settlement; the nominated arbiter can resolve it
-/// at any time while Disputed. After a 14-day arbitration window, anyone can trigger a 50/50
-/// split, with the odd unit going to the buyer and a proportional fee on the seller's half.
-/// Parties must trust their chosen arbiter's honesty; without an arbiter, disputes are disabled.
-///
-/// The owner controls token admission, fees for FUTURE escrows, and creation-only pausing.
-/// Existing escrows snapshot their fee and collector. Removing a token or pausing never
-/// prevents settlement. The owner cannot withdraw, redirect, freeze or resolve funds by
-/// virtue of ownership, but may act normally if explicitly selected as a party or arbiter.
-/// Ownership transfers require acceptance; renunciation is disabled.
-///
-/// Only standard, non-rebasing, non-fee-on-transfer ERC-20s belong on the allowlist. An exact
-/// incoming balance delta rejects inexact funding but cannot detect every malicious token,
-/// future rebase, or token behavior change. Issuer freezes, token pauses, and blocklisting
-/// of a party or snapshotted fee collector can prevent transfers independently of Fluxora.
-/// Failed payouts become pull-payment credits, claimable by the credited account to another
-/// address; settlement never depends on a recipient's ability to receive. Claims still depend
-/// on the token permitting the transfer. The owner is trusted to vet tokens. Direct token
-/// donations and forcibly sent native currency have no recovery path. No native payment entry
-/// point, arbitrary call facility, proxy, delegatecall or selfdestruct is provided. Uses
-/// OpenZeppelin Contracts 5.6.1 APIs.
+/// @notice Buyer-funded escrow with seller acceptance, optional arbitration, and raw token amounts.
+/// @dev Unaudited and not upgradeable. Parties trust their chosen arbiter; the owner is trusted to
+/// vet standard, non-rebasing, non-fee-on-transfer tokens. Exact funding checks cannot detect every
+/// malicious token or future behavior change. The owner controls token admission, future fee terms,
+/// and creation-only pausing, but cannot withdraw, redirect, freeze, or resolve escrow funds merely
+/// by being owner. Existing escrows retain their fee and collector; ownership uses two-step transfer
+/// and cannot be renounced. Failed payouts become account-owned credits claimable to another address;
+/// claims still depend on the token permitting transfers. After 14 days of arbitration, anyone may
+/// split a dispute equally, with the odd unit to the buyer and a proportional fee on the seller share.
+/// The arbiter may still resolve until settlement. Direct token donations and forced native currency
+/// have no recovery path. Uses OpenZeppelin Contracts 5.6.1 APIs.
 contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+
+    // -------------------------------------------------------------------------
+    // Constants
+    // -------------------------------------------------------------------------
 
     /// @notice Maximum seller-paid release fee: 100 basis points (1%).
     uint256 public constant MAX_FEE_BPS = 100;
     /// @notice Maximum time from funding until the derived refund deadline.
     uint256 public constant MAX_DURATION = 365 days;
-    /// @notice Fixed dispute/grace window after the release deadline.
+    /// @notice Grace period between the release and refund deadlines.
     uint256 public constant REFUND_GRACE_PERIOD = 7 days;
     /// @notice Time after opening a dispute until anyone can trigger a split.
     uint256 public constant ARBITRATION_WINDOW = 14 days;
     /// @notice Maximum ids returned by a single history query.
     uint256 public constant MAX_PAGE_SIZE = 100;
 
-    /// @notice Lifecycle; zero denotes an unknown id. Terminal states cannot be reopened.
-    enum Status { None, Pending, Funded, Disputed, Released, Refunded, Split }
+    // -------------------------------------------------------------------------
+    // Types
+    // -------------------------------------------------------------------------
 
-    /// @notice Immutable agreement terms plus current lifecycle status and dispute deadline.
-    /// @param buyer Funder and recipient of any refund or buyer split share.
-    /// @param seller Recipient of a release or seller split share, less the applicable fee.
+    /// @notice Lifecycle states; None denotes an unknown id and terminal states cannot reopen.
+    enum Status {
+        None,
+        Pending,
+        Funded,
+        Disputed,
+        Released,
+        Refunded,
+        Split
+    }
+
+    /// @notice Fixed agreement terms with mutable lifecycle status and dispute deadline.
+    /// @param buyer Funder and recipient of refunds or the buyer split share.
+    /// @param seller Recipient of releases or the seller split share, less fees.
     /// @param arbiter Optional resolver; zero disables disputes.
     /// @param token Underlying ERC-20 contract.
-    /// @param amount Gross funded amount, in raw token units.
-    /// @param releaseDeadline Exclusive deadline for acceptance and ordinary release.
-    /// @param refundDeadline Inclusive start of expiry settlement; disputes must precede this.
-    /// @param fee Full-release fee snapshot; split fees are proportional to the seller's half.
-    /// @param feeCollector Snapshotted collector, unaffected by later owner changes.
-    /// @param ref Public, application-defined reference; zero is permitted.
+    /// @param amount Gross funded amount in raw token units.
+    /// @param releaseDeadline Exclusive acceptance and ordinary release cutoff.
+    /// @param refundDeadline Inclusive expiry settlement start and exclusive dispute cutoff.
+    /// @param fee Full-release fee snapshot; split fees are proportional to the seller share.
+    /// @param feeCollector Collector snapshot, unaffected by later owner changes.
+    /// @param ref Public application reference; zero is permitted.
     /// @param status Current lifecycle state.
-    /// @param disputeDeadline Inclusive start of permissionless split settlement; zero until disputed.
+    /// @param disputeDeadline Inclusive permissionless split start; zero until disputed.
     /// @param releaseOnExpiry Whether expiry permits seller release instead of buyer refund.
     struct Escrow {
         address buyer;
@@ -87,6 +84,10 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         bool releaseOnExpiry;
     }
 
+    // -------------------------------------------------------------------------
+    // State
+    // -------------------------------------------------------------------------
+
     /// @notice Allowlist governing creation only, never settlement.
     mapping(address token => bool supported) public supportedTokens;
     /// @notice Release fee rate for future escrows; initially zero.
@@ -103,6 +104,10 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
     mapping(uint256 id => Escrow) private _escrows;
     mapping(address user => uint256[]) private _userIds;
 
+    // -------------------------------------------------------------------------
+    // Errors
+    // -------------------------------------------------------------------------
+
     /// @notice A required nonzero address is zero.
     error ZeroAddress();
     /// @notice An actor address is invalid or overlaps a prohibited actor.
@@ -113,11 +118,11 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
     error UnsupportedToken(address token);
     /// @notice Escrows must fund a positive amount.
     error ZeroAmount();
-    /// @notice The proposed release deadline is not future or exceeds the duration bound.
+    /// @notice The release deadline is not future or exceeds the duration bound.
     error InvalidDeadline(uint256 releaseDeadline);
-    /// @notice Requested fee exceeds the immutable cap.
+    /// @notice The requested fee exceeds the immutable cap.
     error InvalidFee(uint256 bps);
-    /// @notice The transfer did not increase the contract's token balance by exactly amount.
+    /// @notice The incoming token balance delta does not equal the funded amount.
     error InexactFunding();
     /// @notice No escrow exists with the supplied id.
     error UnknownEscrow(uint256 id);
@@ -125,15 +130,15 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
     error InvalidStatus(uint256 id, Status actual);
     /// @notice The caller lacks the required escrow authority.
     error Unauthorized();
-    /// @notice The release window has ended.
+    /// @notice The acceptance or ordinary release window has ended.
     error ReleaseWindowClosed();
-    /// @notice The unilateral buyer refund window has not started or the expiry rule forbids it.
+    /// @notice The buyer refund deadline or expiry rule does not permit a refund.
     error RefundNotAvailable();
-    /// @notice The expiry rule or deadline does not permit permissionless seller release.
+    /// @notice The deadline or expiry rule does not permit permissionless seller release.
     error ExpiryReleaseNotAvailable(uint256 id);
     /// @notice No arbiter was selected for this escrow.
     error DisputesDisabled();
-    /// @notice Disputes cannot be opened once the expiry settlement deadline is reached.
+    /// @notice The deadline for opening a dispute has been reached.
     error DisputeWindowClosed();
     /// @notice The arbitration window has not expired.
     error DisputeNotExpired(uint256 id);
@@ -144,15 +149,28 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Ownership must be transferred rather than renounced.
     error RenunciationDisabled();
 
+    // -------------------------------------------------------------------------
+    // Events
+    // -------------------------------------------------------------------------
+
     /// @notice Emitted when a token's creation permission changes.
     event TokenSupportUpdated(address indexed token, bool supported);
     /// @notice Emitted when future-escrow fee terms change.
     event FeeUpdated(uint256 feeBps, address indexed feeRecipient);
-    /// @notice Emitted on exact funding of a Pending escrow; complete terms are available through getEscrow.
+    /// @notice Emitted after exact funding; getEscrow exposes the complete stored terms.
     event EscrowCreated(
-        uint256 indexed id, address indexed buyer, address indexed seller,
-        address token, address arbiter, uint256 amount, uint256 releaseDeadline,
-        uint256 refundDeadline, uint256 fee, address feeCollector, bool releaseOnExpiry, bytes32 ref
+        uint256 indexed id,
+        address indexed buyer,
+        address indexed seller,
+        address token,
+        address arbiter,
+        uint256 amount,
+        uint256 releaseDeadline,
+        uint256 refundDeadline,
+        uint256 fee,
+        address feeCollector,
+        bool releaseOnExpiry,
+        bytes32 ref
     );
     /// @notice Emitted when the seller accepts the Pending escrow's terms.
     event EscrowAccepted(uint256 indexed id, address indexed seller);
@@ -160,22 +178,28 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
     event EscrowCancelled(uint256 indexed id, address indexed caller);
     /// @notice Emitted when a party freezes ordinary settlement pending arbitration.
     event EscrowDisputed(uint256 indexed id, address indexed caller);
-    /// @notice Emitted on seller settlement, including arbiter resolution; failed payouts become credits.
+    /// @notice Emitted on seller settlement; failed payouts become credits.
     event EscrowReleased(uint256 indexed id, address indexed caller, uint256 sellerAmount, uint256 fee);
-    /// @notice Emitted on buyer settlement, including cancellation and resolution; refunds have no fee.
+    /// @notice Emitted on buyer settlement, including cancellation; refunds have no fee.
     event EscrowRefunded(uint256 indexed id, address indexed caller, uint256 amount);
-    /// @notice Emitted in addition to the terminal payment event for arbiter resolution.
+    /// @notice Emitted after the terminal payment event for arbiter resolution.
     event EscrowResolved(uint256 indexed id, address indexed arbiter, bool toSeller);
     /// @notice Emitted on timeout split settlement; failed payouts become credits.
-    event EscrowSplit(uint256 indexed id, address indexed caller, uint256 sellerAmount, uint256 fee, uint256 buyerAmount);
+    event EscrowSplit(
+        uint256 indexed id, address indexed caller, uint256 sellerAmount, uint256 fee, uint256 buyerAmount
+    );
     /// @notice Emitted when a failed payout is credited for later withdrawal.
     event PayoutDeferred(address indexed token, address indexed account, uint256 amount);
     /// @notice Emitted when an account successfully withdraws its payout credit.
     event Claimed(address indexed token, address indexed account, address to, uint256 amount);
 
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+
     /// @notice Initializes ownership, a zero fee, and the creation allowlist.
     /// @dev Ownable rejects a zero owner. Empty lists and duplicate valid tokens are allowed.
-    /// @param initialOwner Initial owner and initial fee recipient; cannot be this contract.
+    /// @param initialOwner Initial owner and fee recipient; cannot be this contract.
     /// @param initialTokens Standard ERC-20 contracts to admit initially.
     constructor(address initialOwner, address[] memory initialTokens) Ownable(initialOwner) {
         if (initialOwner == address(this)) revert InvalidActor(initialOwner);
@@ -186,41 +210,47 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @notice Pauses only new escrow creation. All settlement paths remain available.
-    function pause() external onlyOwner { _pause(); }
+    // -------------------------------------------------------------------------
+    // Owner functions
+    // -------------------------------------------------------------------------
+
+    /// @notice Pauses new escrow creation only; settlement remains available.
+    function pause() external onlyOwner {
+        _pause();
+    }
 
     /// @notice Resumes new escrow creation.
-    function unpause() external onlyOwner { _unpause(); }
+    function unpause() external onlyOwner {
+        _unpause();
+    }
 
     /// @notice Changes token admission for future escrows only.
     /// @param token Nonzero ERC-20 address; enabling requires deployed code.
-    /// @param supported Whether to allow funding new escrows in this token.
+    /// @param supported Whether to allow new escrows in this token.
     function setTokenSupported(address token, bool supported) external onlyOwner {
         _setTokenSupported(token, supported);
     }
 
-    /// @notice Sets the release fee for future escrows only, rounded down in token units.
-    /// @param bps Basis points, between zero and MAX_FEE_BPS inclusive.
+    /// @notice Sets the future release fee, rounded down in raw token units.
+    /// @param bps Basis points, from zero through MAX_FEE_BPS.
     function setFeeBps(uint256 bps) external onlyOwner {
         if (bps > MAX_FEE_BPS) revert InvalidFee(bps);
         feeBps = bps;
         emit FeeUpdated(bps, feeRecipient);
     }
 
-    /// @notice Sets the fee collector for future escrows, never existing escrows.
+    /// @notice Sets the fee collector for future escrows, not existing escrows.
     /// @param recipient Nonzero address other than this contract.
     function setFeeRecipient(address recipient) external onlyOwner {
-        if (recipient == address(0)) revert ZeroAddress();
-        if (recipient == address(this)) revert InvalidActor(recipient);
+        _requireRecipient(recipient);
         feeRecipient = recipient;
         emit FeeUpdated(feeBps, recipient);
     }
 
-    /// @notice Starts a two-step ownership handover; the new owner must acceptOwnership.
+    /// @notice Starts a two-step handover; the new owner must call acceptOwnership.
     /// @param newOwner Nonzero recipient other than this contract.
     function transferOwnership(address newOwner) public override onlyOwner {
-        if (newOwner == address(0)) revert ZeroAddress();
-        if (newOwner == address(this)) revert InvalidActor(newOwner);
+        _requireRecipient(newOwner);
         super.transferOwnership(newOwner);
     }
 
@@ -229,23 +259,30 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         revert RenunciationDisabled();
     }
 
-    /// @notice Funds a Pending escrow using a previously approved, allowlisted ERC-20.
-    /// @dev Writes agreement and indexes before transfer; any inexact receipt reverts everything.
-    /// Refund deadline is releaseDeadline + REFUND_GRACE_PERIOD. Fee and collector are frozen
-    /// at execution; callers should inspect current fee settings before submitting funding.
-    /// The seller must accept the terms before ordinary settlement or disputes are available.
+    // -------------------------------------------------------------------------
+    // Escrow lifecycle
+    // -------------------------------------------------------------------------
+
+    /// @notice Funds a Pending escrow with a previously approved, allowlisted ERC-20.
+    /// @dev Stores terms and indexes before funding; inexact receipt reverts everything. The refund
+    /// deadline adds REFUND_GRACE_PERIOD. Current fee and collector are snapshotted at execution.
+    /// Seller acceptance is required before ordinary settlement or disputes.
     /// @param token Standard ERC-20 on the creation allowlist.
-    /// @param seller Nonzero recipient, distinct from buyer and this contract.
-    /// @param arbiter Zero for no disputes, otherwise distinct from both parties and this contract.
-    /// @param amount Positive amount in raw units; no decimal conversion is performed.
-    /// @param releaseDeadline Exclusive acceptance and release cutoff; must be future and leave room for grace
-    /// within MAX_DURATION from the current timestamp.
+    /// @param seller Nonzero recipient distinct from the buyer and this contract.
+    /// @param arbiter Zero disables disputes; otherwise distinct from both parties and this contract.
+    /// @param amount Positive raw token amount; no decimal conversion is performed.
+    /// @param releaseDeadline Future acceptance and release cutoff, leaving grace within MAX_DURATION.
     /// @param releaseOnExpiry True permits seller release at expiry; false permits buyer refund.
-    /// @param ref Public reference; do not include private information.
+    /// @param ref Public application reference; do not include private information.
     /// @return id New escrow id.
     function createEscrow(
-        address token, address seller, address arbiter, uint256 amount,
-        uint256 releaseDeadline, bool releaseOnExpiry, bytes32 ref
+        address token,
+        address seller,
+        address arbiter,
+        uint256 amount,
+        uint256 releaseDeadline,
+        bool releaseOnExpiry,
+        bytes32 ref
     ) external nonReentrant whenNotPaused returns (uint256 id) {
         if (!supportedTokens[token]) revert UnsupportedToken(token);
         if (seller == address(0)) revert ZeroAddress();
@@ -254,8 +291,10 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
             revert InvalidActor(arbiter);
         }
         if (amount == 0) revert ZeroAmount();
-        if (releaseDeadline <= block.timestamp
-            || releaseDeadline - block.timestamp > MAX_DURATION - REFUND_GRACE_PERIOD) {
+        if (
+            releaseDeadline <= block.timestamp
+                || releaseDeadline - block.timestamp > MAX_DURATION - REFUND_GRACE_PERIOD
+        ) {
             revert InvalidDeadline(releaseDeadline);
         }
 
@@ -284,7 +323,7 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         _emitCreated(id, e);
     }
 
-    /// @notice Seller accepts the Pending escrow's snapshotted terms before the release deadline.
+    /// @notice Seller accepts the Pending escrow's terms before the release deadline.
     /// @param id Pending escrow id.
     function acceptEscrow(uint256 id) external nonReentrant {
         Escrow storage e = _inStatus(id, Status.Pending);
@@ -294,8 +333,7 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         emit EscrowAccepted(id, msg.sender);
     }
 
-    /// @notice Buyer withdraws or seller rejects a Pending escrow, refunding the buyer in full.
-    /// @dev Available at any time while Pending, including while creation is paused.
+    /// @notice Either party cancels a Pending escrow for a full buyer refund at any time.
     /// @param id Pending escrow id.
     function cancel(uint256 id) external nonReentrant {
         Escrow storage e = _inStatus(id, Status.Pending);
@@ -315,9 +353,7 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         _settle(id, e, true);
     }
 
-    /// @notice Refunds an undisputed escrow without a fee.
-    /// @dev Seller may refund at any time. Buyer may refund only at or after refundDeadline
-    /// when releaseOnExpiry is false. A permitted actor must submit a transaction.
+    /// @notice Seller refunds anytime; buyer refunds at expiry only if releaseOnExpiry is false.
     /// @param id Funded escrow id.
     function refund(uint256 id) external nonReentrant {
         Escrow storage e = _inStatus(id, Status.Funded);
@@ -328,7 +364,7 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         _settle(id, e, false);
     }
 
-    /// @notice Anyone releases an undisputed escrow at expiry when its terms require seller payment.
+    /// @notice Anyone releases at refundDeadline or later if releaseOnExpiry is true.
     /// @param id Funded escrow id.
     function releaseExpired(uint256 id) external nonReentrant {
         Escrow storage e = _inStatus(id, Status.Funded);
@@ -336,8 +372,8 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         _settle(id, e, true);
     }
 
-    /// @notice Buyer or seller opens a dispute before refundDeadline if an arbiter exists.
-    /// @dev Once disputed, ordinary settlement is disabled; resolve or a timeout split can settle.
+    /// @notice Either party opens a dispute before refundDeadline if an arbiter exists.
+    /// @dev Disputes disable ordinary settlement until arbitration or a timeout split.
     /// @param id Funded escrow id.
     function dispute(uint256 id) external nonReentrant {
         Escrow storage e = _inStatus(id, Status.Funded);
@@ -349,9 +385,9 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         emit EscrowDisputed(id, msg.sender);
     }
 
-    /// @notice Only the nominated arbiter can resolve a disputed escrow, at any time while Disputed.
+    /// @notice Only the nominated arbiter resolves while Disputed, even after its deadline.
     /// @param id Disputed escrow id.
-    /// @param toSeller True releases minus the stored fee; false refunds the buyer in full.
+    /// @param toSeller True releases less the stored fee; false refunds the buyer in full.
     function resolve(uint256 id, bool toSeller) external nonReentrant {
         Escrow storage e = _inStatus(id, Status.Disputed);
         if (msg.sender != e.arbiter) revert Unauthorized();
@@ -376,14 +412,17 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         emit EscrowSplit(id, msg.sender, sellerAmount, fee, buyerAmount);
     }
 
+    // -------------------------------------------------------------------------
+    // Claim
+    // -------------------------------------------------------------------------
+
     /// @notice Withdraws the caller's entire deferred payout credit to a chosen recipient.
-    /// @dev Clears credit before transfer; a failed transfer reverts and preserves the credit.
+    /// @dev Clears credit before transfer; transfer failure reverts and preserves the credit.
     /// @param token Underlying ERC-20 contract for the credit.
     /// @param to Nonzero recipient other than this contract.
-    /// @return amount Credit successfully withdrawn, in raw token units.
+    /// @return amount Credit successfully withdrawn in raw token units.
     function claim(address token, address to) external nonReentrant returns (uint256 amount) {
-        if (to == address(0)) revert ZeroAddress();
-        if (to == address(this)) revert InvalidActor(to);
+        _requireRecipient(to);
         amount = claimable[token][msg.sender];
         if (amount == 0) revert NothingToClaim();
         claimable[token][msg.sender] = 0;
@@ -391,6 +430,10 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         IERC20(token).safeTransfer(to, amount);
         emit Claimed(token, msg.sender, to, amount);
     }
+
+    // -------------------------------------------------------------------------
+    // Views
+    // -------------------------------------------------------------------------
 
     /// @notice Returns the full agreement and status; unknown ids revert.
     /// @param id Escrow id.
@@ -400,16 +443,16 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         return _escrows[id];
     }
 
-    /// @notice Counts escrows where user is buyer or seller; arbitrator-only roles are not indexed.
+    /// @notice Counts buyer/seller history entries; arbiter-only roles are not indexed.
     /// @param user Account whose history to inspect.
     /// @return count Total entries, including terminal escrows.
     function escrowCount(address user) external view returns (uint256 count) {
         return _userIds[user].length;
     }
 
-    /// @notice Returns buyer/seller escrow ids, oldest first, without duplicates per escrow.
+    /// @notice Returns buyer/seller escrow ids oldest first, without duplicates per escrow.
     /// @param user Account whose history to inspect.
-    /// @param offset Zero-based starting index; past-end returns an empty page.
+    /// @param offset Zero-based start; past-end returns an empty page.
     /// @param limit Maximum entries, at most MAX_PAGE_SIZE; zero returns an empty page.
     /// @return ids Selected ids, clamped to available entries.
     function escrowsOf(address user, uint256 offset, uint256 limit) external view returns (uint256[] memory ids) {
@@ -417,11 +460,16 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 length = _userIds[user].length;
         uint256 size = offset >= length ? 0 : Math.min(limit, length - offset);
         ids = new uint256[](size);
-        for (uint256 i; i < size; ++i) ids[i] = _userIds[user][offset + i];
+        for (uint256 i; i < size; ++i) {
+            ids[i] = _userIds[user][offset + i];
+        }
     }
 
-    /// @dev No settlement function checks the current allowlist, owner settings or pause state.
-    /// Terminal status is set before payouts; failed transfers become account-owned credits.
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
+
+    /// @dev Terminal status precedes payouts; current owner settings never gate settlement.
     function _settle(uint256 id, Escrow storage e, bool toSeller) private {
         e.status = toSeller ? Status.Released : Status.Refunded;
         if (toSeller) {
@@ -434,7 +482,7 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @dev Attempts a payout without reverting on transfer failure; zero amounts are skipped.
+    /// @dev Failed transfers become credits; zero amounts require no token interaction.
     function _payout(address token, address to, uint256 amount) private {
         if (amount == 0) return;
         if (!SafeERC20.trySafeTransfer(IERC20(token), to, amount)) {
@@ -459,11 +507,27 @@ contract Fluxora is Ownable2Step, Pausable, ReentrancyGuard {
         emit TokenSupportUpdated(token, supported);
     }
 
-    /// @dev Separate emission helper keeps the funding entry point simple.
+    /// @dev Shares recipient checks without changing their error precedence.
+    function _requireRecipient(address recipient) private view {
+        if (recipient == address(0)) revert ZeroAddress();
+        if (recipient == address(this)) revert InvalidActor(recipient);
+    }
+
+    /// @dev Isolates the full terms event from the funding entry point.
     function _emitCreated(uint256 id, Escrow storage e) private {
         emit EscrowCreated(
-            id, e.buyer, e.seller, e.token, e.arbiter, e.amount, e.releaseDeadline,
-            e.refundDeadline, e.fee, e.feeCollector, e.releaseOnExpiry, e.ref
+            id,
+            e.buyer,
+            e.seller,
+            e.token,
+            e.arbiter,
+            e.amount,
+            e.releaseDeadline,
+            e.refundDeadline,
+            e.fee,
+            e.feeCollector,
+            e.releaseOnExpiry,
+            e.ref
         );
     }
 }

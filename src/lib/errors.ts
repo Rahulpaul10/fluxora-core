@@ -7,7 +7,7 @@ export interface ParsedError {
 }
 
 /** Typed failures raised by the transaction guard before anything is sent. */
-export type TxErrorCode = 'wallet-disconnected' | 'wrong-network' | 'rpc-wrong-chain' | 'rpc-unavailable' | 'busy'
+export type TxErrorCode = 'wallet-disconnected' | 'wrong-network' | 'rpc-wrong-chain' | 'rpc-unavailable' | 'busy' | 'no-account' | 'account-changed' | 'sender-mismatch'
 
 export class TxError extends Error {
   code: TxErrorCode

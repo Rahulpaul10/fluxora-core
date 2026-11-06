@@ -5,6 +5,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { ConfigNotice } from '@/components/ConfigNotice'
 import { WalletWarmup } from '@/components/WalletWarmup'
 import { WalletPromptBanner } from '@/components/WalletPromptBanner'
+import { AccountNotice } from '@/components/AccountNotice'
 import { WalletEvents } from '@/hooks/useWallet'
 import { useRoute } from '@/lib/router'
 import { Dashboard } from '@/pages/Dashboard'
@@ -59,6 +60,7 @@ export default function App() {
       <PendingReconciler />
       <WalletWarmup />
       <WalletPromptBanner />
+      <AccountNotice />
       {switching && <div className="fx-progress" aria-hidden="true" />}
       <div key={shownView} className="animate-rise">
         <ErrorBoundary resetKey={shownView}>

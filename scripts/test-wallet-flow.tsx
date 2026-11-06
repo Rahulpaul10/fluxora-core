@@ -84,7 +84,8 @@ const fakeWallet = createConnector((cfg) => ({
     if (!chain) throw new Error('unknown chain')
     return chain
   },
-  onAccountsChanged: () => undefined,
+  // Like every real wagmi connector: when told the accounts changed, announce it to wagmi
+  onAccountsChanged: (accounts: string[]) => cfg.emitter.emit('change', { accounts: accounts as `0x${string}`[] }),
   onChainChanged: () => undefined,
   onDisconnect: () => undefined,
   getProvider: async () => provider,
@@ -151,9 +152,39 @@ console.log('Account switching')
   go('/send')
   check(await waitFor(() => text().includes('0x0000…bEEF')), 'new account appears on Send after the wallet switches account')
   check(!text().includes('0x0000…dEaD'), 'old account no longer shown')
+  check(text().includes('Your wallet switched accounts') && text().includes('now using'), 'the page says, in words, that the wallet switched accounts and which one is in use')
+  check(await waitFor(() => document.getElementById('to') !== null && text().includes('From') && text().includes('0x0000…bEEF')), 'the Send form shows the sending account')
   wallet.account = ACCOUNT
   conn?.connector.emitter.emit('change', { accounts: [ACCOUNT] })
   await waitFor(() => text().includes('0x0000…dEaD'))
+}
+
+console.log('Wallet moves to another account without telling the page (the Rabby case)')
+{
+  const { getAccount } = await import('wagmi/actions')
+  wallet.mode = 'reject'
+  wallet.sent.length = 0
+  await startSend() // review screen for ACCOUNT (dEaD), fee loaded
+  const conn = config.state.connections.get(config.state.current ?? '')
+  check(getAccount(config).address === ACCOUNT, 'before the switch the page uses the first account')
+  wallet.account = ACCOUNT_2 // the wallet's active account changes; NO accountsChanged event is sent
+  window.dispatchEvent(new Event('focus')) // the page re-checks the wallet when it regains focus
+  check(await waitFor(() => text().includes('Your wallet is on a different account')), 'the page warns that the wallet is on a different account')
+  check(text().includes('0x0000…bEEF') && text().includes('0x0000…dEaD') && text().includes('sending is blocked'), 'the warning names both accounts and says sending is blocked')
+  check(getAccount(config).address === ACCOUNT, 'the page did NOT switch accounts by itself')
+  button('Confirm and sign')?.click()
+  check(await waitFor(() => text().includes('Nothing was sent') && text().includes('is showing')), 'confirming is refused with a clear message')
+  await sleep(300)
+  check(wallet.sent.length === 0, 'no transaction request reached the wallet (the sender can never silently differ)')
+  const use = button('Use 0x0000…bEEF')
+  check(use !== undefined, 'the warning offers an explicit "Use" button for the wallet account')
+  use?.click()
+  check(await waitFor(() => getAccount(config).address === ACCOUNT_2), 'after the user clicks it, the page uses the wallet account')
+  check(await waitFor(() => !text().includes('Your wallet is on a different account')), 'the warning clears once both agree')
+  wallet.account = ACCOUNT
+  conn?.connector.emitter.emit('change', { accounts: [ACCOUNT] })
+  await waitFor(() => getAccount(config).address === ACCOUNT)
+  button('Dismiss')?.click()
 }
 
 console.log('Network switching')
@@ -165,6 +196,56 @@ console.log('Network switching')
   wallet.chainId = 5042
   conn?.connector.emitter.emit('change', { chainId: 5042 })
   check(await waitFor(() => document.getElementById('to') !== null), 'back on Arc: Send form returns')
+}
+
+console.log('Send flow, Max and near-full-balance amounts leave enough USDC for the prepaid gas')
+{
+  const { getPublicClient } = await import('wagmi/actions')
+  const { formatUnits, parseUnits, erc20Abi } = await import('viem')
+  const pc = getPublicClient(config, { chainId: 5042 })
+  const amt = () => document.getElementById('amt') as HTMLInputElement
+  if (pc) {
+    const balance = await pc.readContract({ address: '0x3600000000000000000000000000000000000000', abi: erc20Abi, functionName: 'balanceOf', args: [ACCOUNT] })
+    wallet.mode = 'reject' // the wallet answers "rejected", so no transaction hash is ever created
+    wallet.sent.length = 0
+    go('/receive')
+    await sleep(300)
+    go('/send')
+    await waitFor(() => document.getElementById('to') !== null)
+    setValue('to', RECIPIENT)
+    const filled = await waitFor(() => {
+      button('Max')?.click()
+      return amt().value !== ''
+    }, 20000)
+    check(filled, 'Max fills in an amount once the network fee is known')
+    const maxRaw = filled ? parseUnits(amt().value, 6) : 0n
+    check(maxRaw > 0n && maxRaw < balance, 'Max is below the balance, because the gas stays in the account', `${amt().value} of ${formatUnits(balance, 6)} USDC`)
+    check(await waitFor(() => button('Review transfer')?.disabled === false, 20000), 'Max passes validation after the fee is re-estimated for that exact amount')
+    button('Review transfer')?.click()
+    await waitFor(() => button('Confirm and sign') !== undefined)
+    button('Confirm and sign')?.click()
+    check(await waitFor(() => wallet.sent.length > 0, 20000), 'the wallet receives the Max transfer')
+    const tx = wallet.sent[0]?.tx ?? {}
+    const sentAmount = BigInt('0x' + (tx.data ?? '0x0').slice(-64))
+    // The wallet now prices the transfer itself. Price it the way Rabby does (1.3 x the gas used, node fee quote) from live data.
+    const walletGas = (await pc.estimateContractGas({ account: ACCOUNT, address: '0x3600000000000000000000000000000000000000', abi: erc20Abi, functionName: 'transfer', args: [RECIPIENT, sentAmount] }) * 13n) / 10n
+    const quote = await pc.estimateFeesPerGas()
+    const walletFee = quote.maxFeePerGas > 20_000_000_000n ? quote.maxFeePerGas : 20_000_000_000n
+    const prepaid = walletGas * walletFee
+    check(sentAmount === maxRaw, 'the transaction carries exactly the Max amount')
+    check(prepaid > 0n && prepaid <= (balance - sentAmount) * 10n ** 12n, 'what a wallet would take up front (its 1.3x gas at the node fee quote) fits in what Max left behind', `${prepaid} of ${(balance - sentAmount) * 10n ** 12n} native units`)
+    await waitFor(() => button('Confirm and sign') !== undefined && !text().includes('Confirm in your wallet'))
+    button('Edit')?.click()
+    await waitFor(() => document.getElementById('amt') !== null)
+    setValue('amt', formatUnits(balance - 1n, 6))
+    check(await waitFor(() => text().includes('once the network fee') && text().includes('The most you can send is'), 20000), 'leaving 1 micro-USDC: the page explains the fee reserve and the most you can send')
+    check(button('Review transfer')?.disabled === true, 'near-full-balance amount cannot be reviewed')
+    setValue('amt', formatUnits(balance, 6))
+    check(await waitFor(() => text().includes('once the network fee'), 20000) && button('Review transfer')?.disabled === true, 'the entire balance is refused because gas could not be paid')
+    setValue('amt', formatUnits(balance + 1n, 6))
+    check(await waitFor(() => text().includes('Insufficient balance'), 20000) && button('Review transfer')?.disabled === true, 'more than the balance: "Insufficient balance"')
+    wallet.sent.length = 0
+  }
 }
 
 console.log('Send flow, approved')
@@ -194,9 +275,13 @@ console.log('Send flow, approved')
   check(wallet.sent.length === 1, 'repeated clicks during the prompt do not send a second request', `${wallet.sent.length} request(s)`)
   const tx = wallet.sent[0]?.tx ?? {}
   check((tx.to ?? '').toLowerCase() === '0x3600000000000000000000000000000000000000', 'transaction targets the Arc USDC contract')
+  check((tx.from ?? '').toLowerCase() === ACCOUNT.toLowerCase(), 'the request names the connected account as sender (the account whose balance was checked)', tx.from ?? 'missing')
   check((tx.data ?? '').startsWith('0xa9059cbb') && (tx.data ?? '').toLowerCase().includes('1111111111111111111111111111111111111111') && (tx.data ?? '').endsWith((10000).toString(16).padStart(64, '0')), 'calldata is transfer(recipient, 0.01 USDC)')
-  check(BigInt(tx.gas ?? '0x0') >= 21_000n, 'the wallet is handed an estimated gas limit, so it does not have to estimate gas itself', tx.gas ? `${BigInt(tx.gas)} gas` : 'missing')
-  check(BigInt(tx.maxFeePerGas ?? '0x0') >= 20_000_000_000n, 'maxFeePerGas respects the 20 gwei Arc floor', tx.maxFeePerGas ? `${Number(BigInt(tx.maxFeePerGas) / 1_000_000_000n)} gwei` : 'missing')
+  // Regression for the Rabby "Simulation Failed: ERC20: transfer amount exceeds balance" report: the wallet must get the same
+  // plain request any other dApp sends (from, to, data), with no gas or fee fields for its simulator to account for.
+  check(JSON.stringify(Object.keys(tx).sort()) === JSON.stringify(['data', 'from', 'to']), 'the wallet receives a standard ERC-20 transfer request: only from, to and data', Object.keys(tx).sort().join(', '))
+  check(tx.gas === undefined && tx.maxFeePerGas === undefined && tx.maxPriorityFeePerGas === undefined && tx.gasPrice === undefined, 'no gas, maxFeePerGas, maxPriorityFeePerGas or gasPrice is set by the app')
+  check(tx.value === undefined && tx.type === undefined && tx.nonce === undefined, 'no value, type or nonce is set either')
   check(await waitFor(() => text().includes('Pending') && text().includes('Submitted'), 5000), 'after the wallet returns a hash the page shows Submitted / Pending')
   check(!text().includes('Confirm in your wallet'), 'wallet banner clears once the wallet answers')
   check(text().includes(`${FAKE_HASH.slice(0, 10)}`), 'transaction hash is displayed')

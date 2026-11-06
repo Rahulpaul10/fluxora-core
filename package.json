@@ -20,6 +20,8 @@
     "deploy:record": "bun run ./scripts/broadcast-to-env.ts",
     "setup:contracts": "forge install foundry-rs/forge-std --no-git",
     "test:tx": "bun run ./scripts/test-tx-lifecycle.ts",
+    "test:send": "bun run ./scripts/test-send-reserve.ts",
+    "test:account": "bun run ./scripts/test-account-sync.ts",
     "test:ui": "bun run ./scripts/smoke-ui.tsx",
     "test:wallet": "bun run ./scripts/test-wallet-flow.tsx",
     "verify:deployment": "bun run ./scripts/verify-deployment.ts",

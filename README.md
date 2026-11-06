@@ -41,6 +41,8 @@ bun run preview             # serve the production build
 bun run setup:contracts     # one time: installs forge-std
 forge test                  # contract tests
 bun run test:tx             # transaction tracker tests (no network)
+bun run test:send           # Send gas reserve: Max, near-full-balance and insufficient-balance rules (no network)
+bun run test:account        # wallet account consistency: shown account, transaction sender and wallet account must match (no network)
 bun run test:ui             # renders every page with a read-only test wallet against live Arc RPC
 bun run test:wallet         # fake-wallet Send flow, account/network switching, duplicate-click guard
 bun run gen:abis            # after changing contracts: refresh the app's ABIs
